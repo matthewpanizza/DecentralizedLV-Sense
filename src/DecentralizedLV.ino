@@ -3,7 +3,7 @@
  * Description:
  * Author:
  * Date:
- */
+ /
 #define SPEEDTHR 10
 #define MTR_TEMP_THR    60
 #define MTR_LPM_OFFSET  10

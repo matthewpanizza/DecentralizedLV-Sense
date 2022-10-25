@@ -1,0 +1,27 @@
+Removed Pin From Net: NetName=12V0 Pin=C1-P
+Removed Pin From Net: NetName=12V0 Pin=C3-1
+Removed Pin From Net: NetName=12V0 Pin=F1-2
+Removed Pin From Net: NetName=12V0 Pin=U1-1
+Added Pin To Net: NetName=12V0 Pin=F1-1
+Added Pin To Net: NetName=12V0 Pin=J1-1
+Change Net Name : Old Net Name=12V0 New Net Name=12V0_UF
+Added Pin To Net: NetName=12V0 Pin=C1-P
+Added Pin To Net: NetName=12V0 Pin=C3-1
+Added Pin To Net: NetName=12V0 Pin=F1-2
+Added Pin To Net: NetName=12V0 Pin=U1-1
+Added Net: Name=12V0
+Added Member To Class: ClassName=Main Member=Component J4 AndersonEdgeMount
+Added Member To Class: ClassName=Main Member=Component J5 SSW-112-01-X-S
+Added Member To Class: ClassName=Main Member=Component J7 TB001-500-10BE
+Added Member To Class: ClassName=Main Member=Component J8 AndersonEdgeMount
+Added Member To Class: ClassName=Main Member=Component R7 CRG0805F13K
+Added Member To Class: ClassName=Main Member=Component R8 CRG0805F13K
+Added Member To Class: ClassName=Main Member=Component R9 CRG0805F30K
+Added Member To Class: ClassName=Main Member=Component R11 CRG0805F30K
+Added Member To Class: ClassName=Main Member=Component R13 CRG0805F30K
+Added Member To Class: ClassName=Main Member=Component R14 CRG0805F13K
+Added Member To Class: ClassName=Main Member=Component R15 CRG0805F13K
+Added Member To Class: ClassName=Main Member=Component R16 CRG0805F30K
+Added Member To Class: ClassName=Main Member=Component R17 CRG0805F13K
+Added Member To Class: ClassName=Main Member=Component R18 CRG0805F30K
+Added Member To Class: ClassName=Main Member=Component R19 CRG0805F13K
