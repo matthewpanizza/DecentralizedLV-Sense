@@ -3,7 +3,7 @@
  * Description:
  * Author:
  * Date:
- /
+ */
 #define SPEEDTHR 10
 #define MTR_TEMP_THR    60
 #define MTR_LPM_OFFSET  10
@@ -17,6 +17,9 @@
 #define DRV_FAN_INIT_MODE 1
 
 #define CAN_SNS 0x100
+
+//#define USING_VW_DASH
+//#define USING_CAMRY_DASH
 
 //Macros to map hardware pins to the switches
 #define HEADLIGHT   D0
@@ -39,7 +42,7 @@ Timer rTimer(3000, relayReInitTimer);
 
 //Global Variables
 uint8_t rTurn, lTurn, brake, reverse, fanPWM;   //PWM controllable lights
-bool rPress, lPress, brkPress, revPress, pumpPress, headlight, highbeam, highPress, trunkRel, solPress, pumpSelect, ignition, mButton;
+bool rPress, lPress, brkPress, revPress, pumpPress, headlight, last_headlight, highbeam, last_highbeam, highPress, trunkRel, solPress, pumpSelect, ignition, mButton;
 bool radFan, radPump, brakeBoost, battFan, mpptOn, solChg;
 bool startAnim = true;
 bool startupHdl = true;
@@ -48,6 +51,7 @@ bool LPMode;    //Low-power enable flag - setting true disables the power steeri
 bool pumpInit;  //Flag to manually send the CAN packets for the power steering pump so it turns on from being completely cut off
 bool pumpRelay;    //Flag set if pump should be on. Controls high-power relay for steering pump
 bool pumpLastPress;
+uint8_t pumpState = 0;
 
 bool lastIgn = false;
 bool LPMDebounce = false;
@@ -96,9 +100,21 @@ uint8_t spoofNum = 0;
 uint8_t errcode = 0;
 
 uint8_t battPct;
+uint8_t rmsFault = 1;
+
+uint32_t loop_time = 0;
+bool bmsFault = false;
+bool switchFault = false;
+bool dashAnim = true;
+
+bool USING_CAMRY_DASH = true;
+uint8_t trn_gear = 0;
 
 // setup() runs once, when the device is first turned on.
 void setup() {
+    Serial.begin(115200);
+
+    USING_CAMRY_DASH = EEPROM.read(0);
 
     can.begin(500000);      //Start CAN at 500kbps
     can.addFilter(0x101, 0x7FF);        //Allow incoming messages from ID 0x101
@@ -120,6 +136,18 @@ void setup() {
 
     configurePins();    //Set up the GPIO pins for reading the state of the switches
     readPins();     //Get the initial reading of the switches
+
+    if(!digitalRead(A0)){   //Dash Selector
+        USING_CAMRY_DASH = !USING_CAMRY_DASH;       //Switch to other dashboard
+        EEPROM.write(0, USING_CAMRY_DASH);          //Save to EEPROM for read on next boot
+        for(int i = 1; i <= 10; i++){                //Loop and flash headlights to indicate success
+            CANSend(CAN_SNS,0,0,0,0,(i%2),0,0,0);   //CANSend with a flash every other iteration
+            delay(500);
+        }
+    }
+
+    last_headlight = !headlight;    //Set to inverse so the main loop does an update upon starting the car
+    last_highbeam = !highbeam;      //Set to inverse so the main loop does an update upon starting the car
 
     //Set the lights to be off initially
     rTurn = 0;
@@ -154,18 +182,72 @@ void loop() {
     byte tx5 = ignition + (LPMode << 1) + (startAnim << 2) + (startupHdl << 3);
     byte tx7 = radFan + (radPump << 1) + (brakeBoost << 2) + (battFan << 3) + (mpptOn << 4);
     CANSend(CAN_SNS, rTurn,lTurn,brake,fanPWM,tx4,tx5,pumpMode,tx7);   //Send out the main message to the corner boards
-    delay(4);   //Wait 4ms
     if(pumpInit){   //pumpInit is set true for 3 seconds when the switch is turned on to initialize the power steering pump (which requires CAN)
         motorControl(pumpInit,0);   //Function that determines what to send the steering pump based on speed
-        delay(4);
+        pumpState = 1;  //Pump is running
     }
     CANReceive();   //Receive any incoming messages and parse what they mean
-    CANSend(0x280, 0x49, 0x0E, rmsRPM&255, rmsRPM>>8, 0x0E, 0x00, 0x1B, 0x0E);  //Send the code to emulate the RPM dial
-    delay(4);
-    CANReceive();   //Receive any incoming messages and parse what they mean
-    dashSpoof();    //Spoof the dash CAN messages so the error lights turn off
-    CANReceive();   //Receive any incoming messages and parse what they mean
-    analogWrite(DAC1,1850+(battPct*18.5));
+
+    if(!USING_CAMRY_DASH){
+        CANSend(0x280, 0x49, 0x0E, rmsRPM&255, rmsRPM>>8, 0x0E, 0x00, 0x1B, 0x0E);  //Send the code to emulate the RPM dial
+        dashSpoof();    //Spoof the dash CAN messages so the error lights turn off
+        analogWrite(DAC1,1850+(battPct*18.5));
+        if(ignitionADC > IGNITION_UNDERVOLT){
+            digitalWrite(A7, LOW);
+        }
+        else if(ignitionADC > IGNITION_LOW /*&& !LPMDebounce*/){
+            if((millis()/500)%2 == 0){
+                digitalWrite(A7, HIGH);
+            }
+            else{
+                digitalWrite(A7, LOW);
+            }
+        }
+        else{
+            digitalWrite(A7, LOW);
+        }
+    }
+    else{
+        uint8_t lowACC = 0;
+        if(ignitionADC > IGNITION_LOW && ignitionADC < IGNITION_UNDERVOLT) lowACC = 0x04;
+        uint8_t powerSteerState = 0x0;
+        if(pumpState == 0) powerSteerState = 0x38;
+        else if(pumpState == 2){
+            if((millis()/250)%2 == 0) powerSteerState = 0x38;
+            else powerSteerState = 0x0;
+        }
+        uint8_t sysState = 0x0;
+        if(bmsFault || switchFault) sysState = 0x04;
+        uint8_t engineFault = 0x40;
+        if(ignition && rmsFault) engineFault = 0x0;
+        uint8_t otherGear = 0;
+        if(revPress) otherGear = 0x10;
+        else if(trn_gear == 0) otherGear = 0x08;
+        CANSend(0x3B7,0,0,0,0,0,0,0,0);
+        CANSend(0x3B1,0,0,0,0,0,0,0,0);
+        CANSend(0x3BB,engineFault,lowACC,(motorTemp*1.59)+65,0,0,0,0,0);
+        CANSend(0x394,0,powerSteerState,0,0,0,0,0,0);
+        CANSend(0x32C,0,0,0,0,0,0,0,0);
+        CANSend(0x378,0,0,0,0,0,0,0,0);
+        CANSend(0x412,0,0,0,0,0,0,0,0);
+        CANSend(0x411,0,0,0,0,0,0,0,0);
+        CANSend(0x43a,1,1,1,1,0,0,0,0);
+        CANSend(0x633,0x81,0,0,0,0,0,sysState,ignition?0x0D:0);
+        CANSend(0x1EA,0,0,0,0,0,0,rmsRPM/200,rmsRPM%200);
+        CANSend(0x3BC,0,otherGear,0,0,reverse?0:(trn_gear*16),trn_gear?0xA0:0,0,0);
+        CANSend(0x620,0x10,0,0,0,headlight ? 0xF0:0xB0,dashAnim ? 0x0: 0x40,0x08,0);
+        if(ignition) CANSend(0x1C4,0,0,0,0,0,1,0,0);
+        
+        if(headlight != last_headlight || highbeam != last_highbeam){       //This CAN id only needs to get sent if the value has changed
+            CANSend(0x622,0x12,00,0xE8,(headlight << 5) + (highbeam << 6),00,00,00,00);
+            last_headlight = headlight;
+            last_highbeam = highbeam;
+        }
+    }
+
+    //Serial.printlnf("L: %d, T: %d",loop_time,millis());
+    while(millis()-loop_time < 10) delayMicroseconds(1);
+    loop_time = millis();
 }
 
 //Code that sends out spoof CAN Messages for the airbag and ABS so the lights turn off
@@ -174,36 +256,54 @@ void dashSpoof(){
     if(spoofNum == 0){  //Spoof for ABS
         //Errcode is a flag to set different error lights on the dashboard
         CANSend(0x1A0, 0x18, errcode, 0x00, 0x00, 0xfe, 0xfe, 0x00, 0xff);
-        delay(2);
+        //delay(2);
         spoofNum = 1;
     }
     else if(spoofNum == 1){ //Spoof for airbag
         CANSend(0x050, 0x00, 0x80, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00);
-        delay(2);
+        //delay(2);
         spoofNum = 0;
     }
 }
 
 void CANReceive(){
-    if(can.receive(inputMessage)){
+    while(can.receive(inputMessage)){
         if(inputMessage.id == 0x110){   //Message from Joe's computer on the RPM of the motor, gets sent to dash
-            rmsRPM = (inputMessage.data[2] + (inputMessage.data[3] << 8)) << 2;
+            if(!USING_CAMRY_DASH) rmsRPM = (inputMessage.data[2] + (inputMessage.data[3] << 8)) << 2;
+            else rmsRPM = inputMessage.data[2] + (inputMessage.data[3] << 8);
         }
-        if(inputMessage.id == 0x103){   //Message from back-left corner board if the fault flasher is on, turns on/off the dash indicator
-            if(inputMessage.data[0] == 1){
+        else if(inputMessage.id == 0x103){   //Message from back-left corner board if the fault flasher is on, turns on/off the dash indicator
+            if(inputMessage.data[2] == 1 || inputMessage.data[3] == 1){
+                switchFault = inputMessage.data[2];
+                bmsFault = inputMessage.data[3];
                 errcode = 0x82;     //Turn on the dash warning label
             }
             else{
+                bmsFault = false;
+                switchFault = false;
                 errcode = 0x88;     //Turn off the dash warning label
             }
         }
-        if(inputMessage.id == 0x116){
+        else if(inputMessage.id == 0x101){
+            
+            if(inputMessage.data[0] > 0 && inputMessage.data[0] <= 131 && inputMessage.data[1] > 0 && inputMessage.data[1] <= 131) trn_gear = 0;
+            else if(inputMessage.data[1] > 132 && inputMessage.data[1] <= 150) trn_gear = 1;
+            else if(inputMessage.data[0] > 132 && inputMessage.data[0] <= 145) trn_gear = 2;
+            else if(inputMessage.data[1] > 150 && inputMessage.data[1] <= 175) trn_gear = 3;
+            else if(inputMessage.data[0] > 145 && inputMessage.data[0] <= 162) trn_gear = 4;
+            else if(inputMessage.data[1] > 175 && inputMessage.data[1] <= 210) trn_gear = 5;
+            else trn_gear = 6;
+            Serial.printlnf("S1: %d, S2: %d, G: %d",inputMessage.data[0],inputMessage.data[1],trn_gear);
+        }
+        else if(inputMessage.id == 0x116){
             rmsTemp = inputMessage.data[0];
             motorTemp = inputMessage.data[1];
             battTemp = inputMessage.data[5];
             battPct = inputMessage.data[6];
         }
-
+        else if(inputMessage.id == 0x69A){
+            rmsFault = inputMessage.data[2];
+        }
     }
 }
 
@@ -239,20 +339,31 @@ void readPins(){
 
 //Take the state of the switches and do stuff with it
 void parseSwitches(){
+    if(bmsFault){
+        RGB.control(true);
+        RGB.color(255,0,0);
+    }
+    else if(switchFault){
+        RGB.control(true);
+        RGB.color(255,100,0);
+    }
+    else{
+        RGB.control(false);
+    }
     if(ignitionADC > IGNITION_UNDERVOLT){
         ignition = true;   //Run a check to make sure LV battery isn't totally drained before turning on high-power items
         LPMode = false;
-        digitalWrite(A7, LOW);
+        //digitalWrite(A7, LOW);
     }
     else if(ignitionADC > IGNITION_LOW /*&& !LPMDebounce*/){
         ignition = true;
         //LPMode = true;
-        if((millis()/500)%2 == 0){
-            digitalWrite(A7, HIGH);
-        }
-        else{
-            digitalWrite(A7, LOW);
-        }
+        //if((millis()/500)%2 == 0){
+        //    digitalWrite(A7, HIGH);
+        //}
+        //else{
+        //    digitalWrite(A7, LOW);
+        //}
     }
     /*else if(ignitionADC > IGNITION_ULTRA_LOW){      //BIG PROBLEM - Battery voltage is below 10V - attempt to disable everything so BMS has power
         static uint32_t dbTimer;
@@ -270,7 +381,6 @@ void parseSwitches(){
     else{
         LPMode = false;
         ignition = false;
-        digitalWrite(A7, LOW);
     } 
 
     lTurn = 255*lPress;     //Max brightness whenever switch is pressd
@@ -326,7 +436,7 @@ void parseSwitches(){
 
         if(pumpPress != pumpLastPress){
             RGB.control(true);
-            RGB.color(0,255,0);
+            if(!bmsFault && !switchFault) RGB.color(0,255,0);
             pumpLastPress = pumpPress;
             if(pumpPress){
                 pumpRelay = 1;
@@ -338,6 +448,7 @@ void parseSwitches(){
                 newPumpMode = 0;
                 pumpInit = 0;
                 pTimer.start();
+                pumpState =2;  //Pump is about to turn off
             }
         }
     }
@@ -396,7 +507,7 @@ void motorControl(bool initialize, bool stop){
 //CAN message to send to the power steering pump, update value flag is there to prevent updating the CAN data every time (since it's constant)
 void sendPumpCAN(bool updateValue){
     if(updateValue){
-        RGB.color(255,0,255);
+        if(!bmsFault && !switchFault) RGB.color(255,0,255);
         pumpCTL.id = 0x201;
         pumpCTL.len = 8;
         
@@ -417,14 +528,15 @@ void pumpStartTimer(){
     RGB.control(false);
     pumpInit = 0;   //Set the initialization flag so the main loop stops sending the 
     if(newPumpMode == 0 && pumpPress){  //If switch was recently turned off but back on again within 3s, stop the timer and exit to cancel
-        
         pTimer.stopFromISR();
+        pumpState = 1;
         return;
     }
     pumpMode = newPumpMode;     //If the switch ahs not been turned back on again, apply the newly selected power mode
     if(pumpMode == 0){          //If the pump is getting turned off turn off the relay
         pumpRelay = 0;
         rTimer.startFromISR();      //Start the 1 second timer so the pump relay turns back on (though motor does not start, must send CAN again)
+        pumpState = 0;  //Pump is stopped
     }
     pTimer.stopFromISR();   //Stop the 3s timer so the pump mode isn't getting constantly updated
 }
@@ -472,5 +584,6 @@ void relayReInitTimer(){
 void startupAnimTimer(){
     startAnim = 0;
     startupHdl = 0;
+    dashAnim = false;
     aTimer.stopFromISR();
 }
